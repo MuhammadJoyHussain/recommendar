@@ -1,0 +1,11 @@
+candidate_skills,job_skills,experience_years,education_level,job_role,selected
+python flask mongodb,python django mongodb,3,Bachelor,Backend Developer,1
+react javascript css,react typescript css,2,Bachelor,Frontend Developer,1
+excel sql tableau,excel sql powerbi,1,Bachelor,Data Analyst,0
+node express javascript,nodejs expressjs js,4,Master,Backend Developer,1
+html css javascript,html5 css3 javascript,1,Bachelor,Frontend Developer,1
+python pandas numpy,python pandas sklearn,3,Master,Data Scientist,1
+java spring boot,java spring mvc,5,PhD,Backend Developer,1
+react native mobile,react native android,2,Bachelor,Mobile Developer,1
+sql powerbi data,sql tableau data,1,Bachelor,Data Analyst,0
+php laravel mysql,php laravel sql,4,Master,Backend Developer,1
