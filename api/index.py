@@ -6,6 +6,7 @@ from pymongo import MongoClient
 import pandas as pd
 import numpy as np
 import joblib
+from catboost import CatBoostClassifier
 
 # Load environment variables
 load_dotenv()
@@ -39,7 +40,8 @@ jobs_df = pd.DataFrame(jobs)
 
 # Load models and encoders
 model_dir = os.path.join(os.path.dirname(__file__), '../models')
-clf = joblib.load(os.path.join(model_dir, "job_match_model.pkl"))
+clf = CatBoostClassifier()
+clf.load_model(os.path.join(model_dir, "job_match_model.cbm"))
 tfidf_candidate = joblib.load(os.path.join(model_dir, "vectorizer_candidate.pkl"))
 tfidf_job = joblib.load(os.path.join(model_dir, "vectorizer_job.pkl"))
 le_edu = joblib.load(os.path.join(model_dir, "le_education.pkl"))
