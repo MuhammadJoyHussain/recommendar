@@ -130,7 +130,7 @@ def recommend_users():
 
     job_vec = tfidf_job.transform([job_skills]).toarray()
 
-    user_cursor = jobdb.users.find({}, {
+    user_cursor = jobdb.users.find( {"role": "user"}, {
         "_id": 1,
         "firstName": 1,
         "lastName": 1,
