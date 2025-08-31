@@ -1,20 +1,30 @@
 import os
+import re
 from datetime import datetime
-from flask import Flask, jsonify, request
+from flask import Flask, request, jsonify
+from flask_cors import CORS
 from pymongo import MongoClient
-from bson import ObjectId
 import joblib
 import pandas as pd
-import re
+
+app = Flask(__name__)
+CORS(app)
 
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017/")
 MONGO_DB = os.getenv("MONGO_DB", "beacon-nest")
-MODEL_PATH = os.path.join(os.path.dirname(__file__), "..", "models", "xgb_recruitment_model.joblib")
-
-app = Flask(__name__)
 client = MongoClient(MONGO_URI)
 db = client[MONGO_DB]
-model = joblib.load(MODEL_PATH)
+
+MODEL_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "models", "xgb_recruitment_model.joblib"))
+_model = None
+
+def get_model():
+    global _model
+    if _model is None:
+        if not os.path.exists(MODEL_PATH):
+            raise FileNotFoundError(f"Model not found at {MODEL_PATH}")
+        _model = joblib.load(MODEL_PATH)
+    return _model
 
 def _to_text_list(x):
     if not x: return []
@@ -24,37 +34,31 @@ def _to_text_list(x):
 
 def _years_from_experience(exp_items):
     if not exp_items: return 0.0
-    years = 0.0
-    now = datetime.utcnow().date()
+    years, now = 0.0, datetime.utcnow().date()
     for item in exp_items:
         sd = str(item.get("startDate") or "").split("T")[0]
         ed = str(item.get("endDate") or "").split("T")[0]
-        try:
-            sdate = datetime.fromisoformat(sd).date()
-        except Exception:
-            continue
+        try: sdate = datetime.fromisoformat(sd).date()
+        except Exception: continue
         edate = now
         if ed:
-            try:
-                edate = datetime.fromisoformat(ed).date()
-            except Exception:
-                edate = now
+            try: edate = datetime.fromisoformat(ed).date()
+            except Exception: pass
         if edate > sdate:
             years += (edate - sdate).days / 365.25
     return round(max(years, 0.0), 2)
 
 def _locations_match(cand_loc, job_loc):
     if not cand_loc or not job_loc: return 0
-    c0 = str(cand_loc).lower()
-    j0 = str(job_loc).lower()
+    c0, j0 = str(cand_loc).lower(), str(job_loc).lower()
     return int(any(part.strip() and part.strip() in j0 for part in re.split(r"[,/|-]", c0)))
 
 def _parse_salary_range(s):
     if not s: return None, None, None
-    cur = None
     nums = [int(x.replace(",", "")) for x in re.findall(r"\d[\d,]*", s)]
-    cur_m = re.search(r"\b(usd|gbp|eur|cad|aud|inr)\b", s.lower())
-    if cur_m: cur = cur_m.group(1).upper()
+    cur = None
+    m = re.search(r"\b(usd|gbp|eur|cad|aud|inr)\b", s.lower())
+    if m: cur = m.group(1).upper()
     if len(nums) == 1: return nums[0], nums[0], cur
     if len(nums) >= 2: return min(nums[0], nums[1]), max(nums[0], nums[1]), cur
     return None, None, cur
@@ -63,17 +67,14 @@ def _salary_match(cand_expected, job_salary):
     if cand_expected is None or job_salary is None: return 0
     js_min, js_max, _ = _parse_salary_range(job_salary)
     if js_min is None: return 0
-    try:
-        ce = int(str(cand_expected).replace(",", ""))
-    except Exception:
-        return 0
+    try: ce = int(str(cand_expected).replace(",", ""))
+    except Exception: return 0
     return int(js_min <= ce <= (js_max or js_min))
 
 def _skill_overlap(a, b):
     sa = set(_to_text_list(a))
     sb = set(_to_text_list(b))
-    inter = sa & sb
-    union = sa | sb
+    inter, union = sa & sb, sa | sb
     cnt = len(inter)
     jacc = round((cnt / len(union)) if union else 0.0, 4)
     return cnt, jacc
@@ -83,7 +84,9 @@ def _prepare_features(candidate, job):
     job_skills = _to_text_list(job.get("skills")) + _to_text_list(job.get("requiredQualifications")) + _to_text_list(job.get("preferredQualifications"))
     cand_skills_str = "|".join(cand_skills)
     job_skills_str = "|".join(job_skills)
-    exp_years = _years_from_experience(candidate.get("experience"))
+    exp_years = candidate.get("experience_years")
+    if exp_years is None:
+        exp_years = _years_from_experience(candidate.get("experience"))
     edu = candidate.get("education_level") or candidate.get("education") or "Unknown"
     role = job.get("title") or "Unknown"
     industry = job.get("industry") or job.get("department") or "Unknown"
@@ -91,13 +94,15 @@ def _prepare_features(candidate, job):
     job_loc = job.get("location") or "Unknown"
     job_type = job.get("type") or "Unknown"
     dept = job.get("department") or "Unknown"
-    loc_match = _locations_match(cand_loc, job_loc)
+    loc_match = candidate.get("location_match")
+    if loc_match is None:
+        loc_match = _locations_match(cand_loc, job_loc)
     salary_match = _salary_match(candidate.get("expectedSalary"), job.get("salary"))
     overlap_count, jaccard = _skill_overlap(cand_skills_str, job_skills_str)
     return pd.DataFrame([{
         "candidate_skills": cand_skills_str,
         "job_skills": job_skills_str,
-        "experience_years": exp_years,
+        "experience_years": float(exp_years or 0.0),
         "education_level": str(edu),
         "job_role": str(role),
         "industry": str(industry),
@@ -115,52 +120,71 @@ def _prepare_features(candidate, job):
 def health():
     return {"status": "ok"}
 
-@app.get("/recommend/<candidate_id>")
-def recommend_jobs(candidate_id):
+@app.post("/recommend")
+def recommend_jobs_for_user_payload():
     try:
-        cand = db.candidates.find_one({"_id": ObjectId(candidate_id)})
-    except Exception:
-        return jsonify({"error": "invalid candidate_id"}), 400
-    if not cand:
-        return jsonify({"error": "candidate not found"}), 404
-    jobs = list(db.jobs.find({}))
-    scored = []
-    for job in jobs:
-        feats = _prepare_features(cand, job)
-        prob = float(model.predict_proba(feats)[:, 1][0])
-        scored.append({
-            "job_id": str(job["_id"]),
-            "title": job.get("title"),
-            "company": job.get("company"),
-            "location": job.get("location"),
-            "probability": prob
-        })
-    scored.sort(key=lambda x: x["probability"], reverse=True)
-    top_n = int(request.args.get("top_n", 5))
-    return jsonify({"candidate_id": candidate_id, "recommendations": scored[:top_n]})
+        data = request.get_json(force=True) or {}
+        candidate = {
+            "skills": data.get("skills") or [],
+            "experience": data.get("experience"),
+            "experience_years": data.get("experience_years"),
+            "education_level": data.get("education_level"),
+            "city": data.get("city"),
+            "country": data.get("country"),
+            "expectedSalary": data.get("expectedSalary"),
+            "location_match": data.get("location_match"),
+        }
+        jobs = list(db.jobs.find({}))
+        mdl = get_model()
+        scored = []
+        for job in jobs:
+            feats = _prepare_features(candidate, job)
+            prob = float(mdl.predict_proba(feats)[:, 1][0])
+            scored.append({
+                "job_id": str(job.get("_id")),
+                "title": job.get("title"),
+                "company": job.get("company"),
+                "location": job.get("location"),
+                "probability": prob
+            })
+        scored.sort(key=lambda x: x["probability"], reverse=True)
+        top_n = int(data.get("top_n", 5))
+        return jsonify({"recommendations": scored[:top_n]})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
-@app.get("/match/<job_id>")
-def match_candidates(job_id):
+@app.post("/recommend-users")
+def recommend_users_for_job_payload():
     try:
-        job = db.jobs.find_one({"_id": ObjectId(job_id)})
-    except Exception:
-        return jsonify({"error": "invalid job_id"}), 400
-    if not job:
-        return jsonify({"error": "job not found"}), 404
-    cands = list(db.candidates.find({}))
-    scored = []
-    for cand in cands:
-        feats = _prepare_features(cand, job)
-        prob = float(model.predict_proba(feats)[:, 1][0])
-        scored.append({
-            "candidate_id": str(cand["_id"]),
-            "name": f'{cand.get("firstName","")} {cand.get("lastName","")}'.strip(),
-            "city": cand.get("city"),
-            "probability": prob
-        })
-    scored.sort(key=lambda x: x["probability"], reverse=True)
-    top_n = int(request.args.get("top_n", 5))
-    return jsonify({"job_id": job_id, "matches": scored[:top_n]})
+        data = request.get_json(force=True) or {}
+        job = {
+            "skills": data.get("skills") or [],
+            "requiredQualifications": data.get("requiredQualifications") or [],
+            "preferredQualifications": data.get("preferredQualifications") or [],
+            "title": data.get("title"),
+            "location": data.get("location"),
+            "type": data.get("type"),
+            "department": data.get("department"),
+            "salary": data.get("salary"),
+            "industry": data.get("industry"),
+        }
+        candidates = list(db.candidates.find({}))
+        mdl = get_model()
+        scored = []
+        for cand in candidates:
+            feats = _prepare_features(cand, job)
+            prob = float(mdl.predict_proba(feats)[:, 1][0])
+            scored.append({
+                "candidate_id": str(cand.get("_id")),
+                "name": f'{cand.get("firstName","")} {cand.get("lastName","")}'.strip(),
+                "city": cand.get("city"),
+                "probability": prob
+            })
+        scored.sort(key=lambda x: x["probability"], reverse=True)
+        top_n = int(data.get("top_n", 5))
+        return jsonify({"matches": scored[:top_n]})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
