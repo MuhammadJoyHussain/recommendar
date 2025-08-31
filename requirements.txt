@@ -5,4 +5,3 @@ pymongo
 pandas
 scikit-learn
 gunicorn
-catboost

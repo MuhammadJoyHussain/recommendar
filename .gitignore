@@ -1,3 +1,5 @@
 /.env
 .vercel
 train_job/
+test
+.pytest_cache/
