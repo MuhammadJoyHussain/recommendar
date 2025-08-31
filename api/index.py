@@ -1,5 +1,4 @@
-import os
-import re
+import os, re
 from datetime import datetime
 from flask import Flask, request, jsonify
 from flask_cors import CORS
@@ -11,7 +10,10 @@ app = Flask(__name__)
 CORS(app)
 
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017/")
-MONGO_DB = os.getenv("MONGO_DB", "beacon-nest")
+MONGO_DB = os.getenv("MONGO_DB", "recruitment_db")
+JOBS_COLLECTION = os.getenv("JOBS_COLLECTION", "vacancies")  
+CANDS_COLLECTION = os.getenv("CANDS_COLLECTION", "users")
+
 client = MongoClient(MONGO_URI)
 db = client[MONGO_DB]
 
@@ -71,22 +73,26 @@ def _salary_match(cand_expected, job_salary):
     except Exception: return 0
     return int(js_min <= ce <= (js_max or js_min))
 
-def _skill_overlap(a, b):
+def _skill_overlap_sets(a, b):
     sa = set(_to_text_list(a))
     sb = set(_to_text_list(b))
     inter, union = sa & sb, sa | sb
     cnt = len(inter)
     jacc = round((cnt / len(union)) if union else 0.0, 4)
-    return cnt, jacc
+    return cnt, jacc, sorted(list(inter))
 
 def _prepare_features(candidate, job):
     cand_skills = _to_text_list(candidate.get("skills"))
-    job_skills = _to_text_list(job.get("skills")) + _to_text_list(job.get("requiredQualifications")) + _to_text_list(job.get("preferredQualifications"))
+    job_skills = _to_text_list(job.get("skills")) \
+               + _to_text_list(job.get("requiredQualifications")) \
+               + _to_text_list(job.get("preferredQualifications"))
     cand_skills_str = "|".join(cand_skills)
     job_skills_str = "|".join(job_skills)
+
     exp_years = candidate.get("experience_years")
     if exp_years is None:
         exp_years = _years_from_experience(candidate.get("experience"))
+
     edu = candidate.get("education_level") or candidate.get("education") or "Unknown"
     role = job.get("title") or "Unknown"
     industry = job.get("industry") or job.get("department") or "Unknown"
@@ -94,12 +100,15 @@ def _prepare_features(candidate, job):
     job_loc = job.get("location") or "Unknown"
     job_type = job.get("type") or "Unknown"
     dept = job.get("department") or "Unknown"
+
     loc_match = candidate.get("location_match")
     if loc_match is None:
         loc_match = _locations_match(cand_loc, job_loc)
     salary_match = _salary_match(candidate.get("expectedSalary"), job.get("salary"))
-    overlap_count, jaccard = _skill_overlap(cand_skills_str, job_skills_str)
-    return pd.DataFrame([{
+
+    overlap_count, jaccard, matched = _skill_overlap_sets(cand_skills_str, job_skills_str)
+
+    features = pd.DataFrame([{
         "candidate_skills": cand_skills_str,
         "job_skills": job_skills_str,
         "experience_years": float(exp_years or 0.0),
@@ -116,9 +125,25 @@ def _prepare_features(candidate, job):
         "skill_jaccard": float(jaccard),
     }])
 
+    return features, matched
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+@app.get("/debug/status")
+def debug_status():
+    try:
+        return {
+            "db": MONGO_DB,
+            "jobs_collection": JOBS_COLLECTION,
+            "cands_collection": CANDS_COLLECTION,
+            "jobs_count": db[JOBS_COLLECTION].count_documents({}),
+            "cands_count": db[CANDS_COLLECTION].count_documents({}),
+            "has_model": os.path.exists(MODEL_PATH)
+        }
+    except Exception as e:
+        return {"error": str(e)}, 500
 
 @app.post("/recommend")
 def recommend_jobs_for_user_payload():
@@ -134,18 +159,37 @@ def recommend_jobs_for_user_payload():
             "expectedSalary": data.get("expectedSalary"),
             "location_match": data.get("location_match"),
         }
-        jobs = list(db.jobs.find({}))
+
+        jobs = list(db[JOBS_COLLECTION].find({}))
+        if not jobs:
+            body_jobs = data.get("jobs") or []
+            jobs = [{
+                "_id": j.get("_id") or j.get("id"),
+                "title": j.get("title"),
+                "company": j.get("company"),
+                "location": j.get("location"),
+                "type": j.get("type"),
+                "department": j.get("department"),
+                "salary": j.get("salary"),
+                "industry": j.get("industry"),
+                "skills": j.get("skills") or j.get("requiredQualifications") or [],
+                "requiredQualifications": j.get("requiredQualifications") or [],
+                "preferredQualifications": j.get("preferredQualifications") or [],
+            } for j in body_jobs]
+
         mdl = get_model()
         scored = []
         for job in jobs:
-            feats = _prepare_features(candidate, job)
+            feats, matched = _prepare_features(candidate, job)
             prob = float(mdl.predict_proba(feats)[:, 1][0])
             scored.append({
                 "job_id": str(job.get("_id")),
                 "title": job.get("title"),
                 "company": job.get("company"),
                 "location": job.get("location"),
-                "probability": prob
+                "type": job.get("type"),
+                "probability": prob,
+                "matched_skills": matched,
             })
         scored.sort(key=lambda x: x["probability"], reverse=True)
         top_n = int(data.get("top_n", 5))
@@ -168,17 +212,32 @@ def recommend_users_for_job_payload():
             "salary": data.get("salary"),
             "industry": data.get("industry"),
         }
-        candidates = list(db.candidates.find({}))
+
+        candidates = list(db[CANDS_COLLECTION].find({}))
+        if not candidates:
+            body_cands = data.get("candidates") or []
+            candidates = [{
+                "_id": c.get("_id") or c.get("id"),
+                "firstName": c.get("firstName"),
+                "lastName": c.get("lastName"),
+                "city": c.get("city"),
+                "country": c.get("country"),
+                "skills": c.get("skills") or [],
+                "experience": c.get("experience") or [],
+                "education_level": c.get("education_level") or c.get("education"),
+            } for c in body_cands]
+
         mdl = get_model()
         scored = []
         for cand in candidates:
-            feats = _prepare_features(cand, job)
+            feats, matched = _prepare_features(cand, job)
             prob = float(mdl.predict_proba(feats)[:, 1][0])
             scored.append({
                 "candidate_id": str(cand.get("_id")),
                 "name": f'{cand.get("firstName","")} {cand.get("lastName","")}'.strip(),
-                "city": cand.get("city"),
-                "probability": prob
+                "city": cand.get("city") or cand.get("country"),
+                "probability": prob,
+                "matched_skills": matched,
             })
         scored.sort(key=lambda x: x["probability"], reverse=True)
         top_n = int(data.get("top_n", 5))
