@@ -12,9 +12,9 @@ app = Flask(__name__)
 CORS(app)
 
 MONGO_URI = os.getenv("MONGO_URI")
-MONGO_DB = os.getenv("MONGO_DB")
-JOBS_COLLECTION = os.getenv("JOBS_COLLECTION")  
-CANDS_COLLECTION = os.getenv("CANDS_COLLECTION")
+MONGO_DB = os.getenv("MONGO_DB") or 'beacon-nest'
+JOBS_COLLECTION = os.getenv("JOBS_COLLECTION")  or 'vacancies'
+CANDS_COLLECTION = os.getenv("CANDS_COLLECTION") or 'users'
 
 client = MongoClient(MONGO_URI)
 db = client[MONGO_DB]
