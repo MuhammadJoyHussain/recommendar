@@ -5,14 +5,16 @@ from flask_cors import CORS
 from pymongo import MongoClient
 import joblib
 import pandas as pd
+from dotenv import load_dotenv
 
+load_dotenv()
 app = Flask(__name__)
 CORS(app)
 
-MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017/")
-MONGO_DB = os.getenv("MONGO_DB", "recruitment_db")
-JOBS_COLLECTION = os.getenv("JOBS_COLLECTION", "vacancies")  
-CANDS_COLLECTION = os.getenv("CANDS_COLLECTION", "users")
+MONGO_URI = os.getenv("MONGO_URI")
+MONGO_DB = os.getenv("MONGO_DB")
+JOBS_COLLECTION = os.getenv("JOBS_COLLECTION")  
+CANDS_COLLECTION = os.getenv("CANDS_COLLECTION")
 
 client = MongoClient(MONGO_URI)
 db = client[MONGO_DB]
