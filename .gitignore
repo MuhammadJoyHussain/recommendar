@@ -2,4 +2,4 @@
 .vercel
 train_job/
 test
-.pytest_cache/
+.pytest_cache/.env
