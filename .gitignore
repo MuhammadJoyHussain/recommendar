@@ -4,3 +4,4 @@ train_job/
 test
 .pytest_cache/.env
 .env
+.env
